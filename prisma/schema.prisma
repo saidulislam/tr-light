@@ -1,0 +1,205 @@
+// Talent Review schema.
+// SQLite for local dev; swap `provider` to "postgresql" for production.
+// SQLite has no enum support — string fields below carry valid-values comments.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("EMPLOYEE") // EMPLOYEE | MANAGER | ADMIN
+  managerId String?
+  manager   User?    @relation("Reports", fields: [managerId], references: [id])
+  reports   User[]   @relation("Reports")
+
+  // HR / profile fields (typically sourced from an HRIS).
+  title         String? // e.g. "VP", "Senior VP", "Engineering Director", "Managing Director"
+  grade         String? // e.g. "501", "502", "601", "602", "603.1" (VP), "603.2" (SVP)
+  gradeLevel    String? // e.g. "603.1"
+  jobFamily     String? // e.g. "Software Engineering"
+  jobFunction   String? // e.g. "Technology"
+  city          String?
+  country       String?
+  tenureYears   Float?
+  workingHours  Int?    @default(40)
+  workStatus    String  @default("ACTIVE") // ACTIVE | LEAVE | TERMINATED
+
+  // Optional override of the grade-derived "blast radius" — captures stretched
+  // or scoped-down operating scope. When null, the grade's default is used.
+  effectiveBlastRadius String?
+
+  // Historical ratings + system-fed metrics used as evaluator context.
+  // Kept on User for MVP; split into a per-year HistoricalRating / Metric model later.
+  priorRating2024   String? // STAND_OUT | ACHIEVER | NEEDS_IMPROVEMENT
+  priorRating2025   String?
+  codeContributions Int?    // commits / PRs in the relevant window
+  aiUsagePercent    Float?  // 0–100
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  templatesCreated      Template[]           @relation("TemplateCreator")
+  reviewPeriodsOwned    ReviewPeriod[]       @relation("ReviewPeriodOwner")
+  reviewsGiven          Review[]             @relation("Reviewer")
+  reviewsReceived       Review[]             @relation("Subject")
+  evidenceAuthored      EvidenceEntry[]      @relation("EvidenceAuthor")
+  quintileAssignments   QuintileAssignment[] @relation("AssignmentSubject")
+  quintileMovesAsSubject QuintileMove[]      @relation("MoveSubject")
+  quintileMovesAsMover  QuintileMove[]       @relation("MoveMover")
+}
+
+model ReviewPeriod {
+  id         String    @id @default(cuid())
+  name       String
+  startsAt   DateTime
+  endsAt     DateTime
+  status     String    @default("DRAFT") // DRAFT | OPEN | CLOSED
+  // Recurrence cadence. AD_HOC = one-off; others describe how often a new
+  // period of this cadence is expected. Display-only today; no auto-rollover.
+  cadence    String    @default("AD_HOC") // AD_HOC | MONTHLY | QUARTERLY | SEMIANNUAL | ANNUAL
+  ownerId    String
+  owner      User      @relation("ReviewPeriodOwner", fields: [ownerId], references: [id])
+  templateId String?
+  template   Template? @relation(fields: [templateId], references: [id])
+  reviews    Review[]
+  assignments QuintileAssignment[]
+  moves      QuintileMove[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model Template {
+  id            String         @id @default(cuid())
+  name          String
+  creatorId     String
+  creator       User           @relation("TemplateCreator", fields: [creatorId], references: [id])
+  questions     Question[]
+  reviewPeriods ReviewPeriod[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model Question {
+  id         String   @id @default(cuid())
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  prompt     String
+  kind       String // RATING | TEXT
+  order      Int      @default(0)
+  answers    Answer[]
+}
+
+model Review {
+  id             String       @id @default(cuid())
+  reviewPeriodId String
+  reviewPeriod   ReviewPeriod @relation(fields: [reviewPeriodId], references: [id])
+  subjectId      String
+  subject        User         @relation("Subject", fields: [subjectId], references: [id])
+  reviewerId     String
+  reviewer       User         @relation("Reviewer", fields: [reviewerId], references: [id])
+  kind           String // SELF | MANAGER | PEER | UPWARD
+  status         String       @default("DRAFT") // DRAFT | SUBMITTED
+  submittedAt    DateTime?
+  answers        Answer[]
+
+  // Rubric fields. Used by MANAGER reviews; SELF/PEER/UPWARD may use Answers
+  // (template/question/answer) until they are migrated to the same rubric.
+  // Rating values: STAND_OUT | ACHIEVER | NEEDS_IMPROVEMENT
+  // Evidence lives in the EvidenceEntry table — a dated timeline per dimension.
+  whatRating String?
+  howRating  String?
+
+  evidenceEntries EvidenceEntry[]
+
+  // Last AI suggestion + rationale. Persisted for audit; the rating field above
+  // is the human's final choice and may differ from the AI suggestion.
+  whatRatingAiSuggestion String?
+  whatRatingAiRationale  String?
+  howRatingAiSuggestion  String?
+  howRatingAiRationale   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([reviewPeriodId, subjectId, reviewerId, kind])
+}
+
+model EvidenceEntry {
+  id          String   @id @default(cuid())
+  reviewId    String
+  review      Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  dimension   String // WHAT | HOW | GROWTH
+  type        String   @default("POSITIVE") // POSITIVE | CONCERN (GROWTH ignores)
+  body        String
+  aiGenerated Boolean  @default(false) // true if originated from a Suggest-from-evidence draft
+  authorId    String
+  author      User     @relation("EvidenceAuthor", fields: [authorId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([reviewId, dimension, createdAt])
+}
+
+// Calibration: a person's rank within their grade for a review period.
+// Quintile is derived from rank + grade population (10/25/30/25/10 target).
+model QuintileAssignment {
+  id             String       @id @default(cuid())
+  reviewPeriodId String
+  reviewPeriod   ReviewPeriod @relation(fields: [reviewPeriodId], references: [id])
+  subjectId      String
+  subject        User         @relation("AssignmentSubject", fields: [subjectId], references: [id])
+  // 1-based rank within the subject's grade for this period. 1 = top performer.
+  rankInGrade    Int
+  // Last rationale that produced this state. Required.
+  rationale      String
+  // Where the rationale originated. Always saved by a human (see audit log).
+  source         String       // "AI" | "HUMAN"
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([reviewPeriodId, subjectId])
+  @@index([reviewPeriodId, subjectId])
+}
+
+// Audit log: every accepted move that produces or updates an Assignment.
+model QuintileMove {
+  id             String       @id @default(cuid())
+  reviewPeriodId String
+  reviewPeriod   ReviewPeriod @relation(fields: [reviewPeriodId], references: [id])
+  subjectId      String
+  subject        User         @relation("MoveSubject", fields: [subjectId], references: [id])
+  fromRank       Int?         // null on first placement
+  toRank         Int
+  fromQuintile   Int?
+  toQuintile     Int
+  rationale      String
+  // Who PROPOSED the rationale (AI or human). The human always ACCEPTS.
+  source         String       // "AI" | "HUMAN"
+  movedById      String       // the user who clicked Accept
+  movedBy        User         @relation("MoveMover", fields: [movedById], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([reviewPeriodId, subjectId])
+  @@index([createdAt])
+}
+
+model Answer {
+  id         String   @id @default(cuid())
+  reviewId   String
+  review     Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  rating     Int? // 1 (Outstanding) – 5 (Needs improvement). Lower is better.
+  text       String?
+  updatedAt  DateTime @updatedAt
+
+  @@unique([reviewId, questionId])
+}
