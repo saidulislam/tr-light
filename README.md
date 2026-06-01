@@ -68,4 +68,9 @@ Open <http://localhost:3000>. Pick any user from the dropdown to sign in.
 
 ## Development conventions
 
-See `CLAUDE.md` for the design system, voice & tone, and engineering principles followed throughout.
+Project rules (design system, voice & tone, engineering principles) are kept in two places, depending on which assistant you use:
+
+- **Claude Code** → `CLAUDE.md` (auto-loaded, references `AGENTS.md`)
+- **GitHub Copilot (VS Code)** → `.github/copilot-instructions.md` (auto-loaded)
+
+Both files describe the same conventions; keep them roughly in sync if you edit either.
